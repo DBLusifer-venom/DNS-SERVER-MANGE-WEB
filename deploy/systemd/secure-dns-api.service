@@ -1,0 +1,24 @@
+[Unit]
+Description=SecureDNS Manager API
+After=network.target
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=securedns
+Group=securedns
+WorkingDirectory=/opt/secure-dns/backend
+EnvironmentFile=/opt/secure-dns/backend/.env
+ExecStart=/opt/secure-dns/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 2
+Restart=on-failure
+RestartSec=5
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/secure-dns/backend
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
