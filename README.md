@@ -13,9 +13,40 @@ lockout) + users CRUD + audit log + Vue 3 frontend (login, dashboard, users,
 audit).
 
 **Phase 1a complete**: pure-Python rndc client (isccc protocol, TSIG
-HMAC-SHA256, vendored from ISC's python-rndc, MPL-2.0), server registration
-with encrypted TSIG keys, connectivity testing (`rndc status`), servers page
-in the UI. Phase 1b (zone registry via `rndc addzone`) is next.
+HMAC-SHA256/384/512, vendored from ISC's python-rndc, MPL-2.0), server
+registration with encrypted TSIG keys, connectivity testing (`rndc status`),
+servers page in the UI. Phase 1b (zone registry via `rndc addzone`) is next.
+
+**Security hardening round complete** (from external review):
+- Mandatory `SECRET_KEY`/`FERNET_KEY`/`ADMIN_PASSWORD`; startup refuses
+  insecure or placeholder values; Swagger/docs disabled in production
+- Destination policy: DNS server hosts must resolve inside
+  `DNS_MANAGEMENT_NETWORKS`; loopback/link-local/multicast/metadata ranges
+  denied (loopback allowed only in development)
+- HMAC-MD5 and HMAC-SHA1 removed; SHA-256/384/512 only
+- JWT no longer carries the role claim (database is authoritative)
+- Refresh tokens moved to HttpOnly + Secure + SameSite=strict cookies;
+  access token lives in memory only (no localStorage)
+- Server-level RBAC: operators only see/manage assigned servers
+- Stricter systemd sandboxing + nginx CSP/referrer/permissions headers
+
+## Security model
+
+- **Startup**: in production the app refuses to start unless
+  `SECRET_KEY`, `FERNET_KEY`, `ADMIN_PASSWORD` and
+  `DNS_MANAGEMENT_NETWORKS` are set to real values (placeholders rejected).
+- **Sessions**: Argon2id passwords; short-lived JWT access token (memory
+  only in the browser) + rotated, revocable refresh token in an HttpOnly
+  cookie; per-account lockout after failed logins.
+- **Server destinations**: every registered DNS server's resolved IPs must
+  fall inside `DNS_MANAGEMENT_NETWORKS`; denied networks (link-local,
+  multicast, loopback in production, test ranges) are refused at
+  registration, update, and every rndc connect.
+- **Keys**: rndc control and dynamic-update TSIG keys are stored separately
+  and encrypted at rest (Fernet). Use distinct keys per function on the
+  BIND side too (rndc-control vs dns-update vs axfr-read).
+- **RBAC**: admin (everything), operator (assigned servers only), viewer
+  (read-only dashboards). Every mutation is written to the audit log.
 
 ## Development (Windows/macOS/Linux)
 
@@ -31,7 +62,8 @@ uvicorn app.main:app --reload --port 8000
 ```
 
 On first startup the bootstrap admin from `ADMIN_USERNAME`/`ADMIN_PASSWORD`
-in `.env` is created. **Change the default password immediately.**
+in `.env` is created. Set a strong password — the app refuses known
+placeholder values.
 
 ### Tests
 
@@ -92,16 +124,17 @@ nginx, certbot.
 
 | Method | Path | Access |
 |--------|------|--------|
-| POST | `/api/auth/login` | public |
-| POST | `/api/auth/refresh` | public (refresh token) |
+| POST | `/api/auth/login` | public (sets HttpOnly refresh cookie) |
+| POST | `/api/auth/refresh` | public (cookie or body token; rotated) |
 | POST | `/api/auth/logout` | authed |
 | GET | `/api/auth/me` | authed |
 | GET/POST | `/api/users` | admin |
 | PATCH/DELETE | `/api/users/{id}` | admin |
-| GET | `/api/servers` | admin/operator |
+| GET | `/api/servers` | admin (all) / operator (assigned) |
 | POST | `/api/servers` | admin |
 | PATCH/DELETE | `/api/servers/{id}` | admin |
-| POST | `/api/servers/{id}/test` | admin/operator |
+| POST | `/api/servers/{id}/test` | admin / assigned operator |
+| GET/PUT | `/api/servers/{id}/assignments` | admin |
 | GET | `/api/audit` | admin/operator |
 | GET | `/api/health` | public |
 
@@ -109,7 +142,14 @@ Interactive docs: `http://localhost:8000/docs`
 
 ## BIND9 server-side setup (per DNS server)
 
-1. Generate a TSIG key: `tsig-keygen -a hmac-sha256 rndc-key`
+Use **separate TSIG keys per function** (blast-radius containment):
+
+1. Generate keys:
+   ```bash
+   tsig-keygen -a hmac-sha256 rndc-control-key
+   tsig-keygen -a hmac-sha256 dns-update-key
+   tsig-keygen -a hmac-sha256 axfr-read-key   # when zone reading lands
+   ```
 2. In `named.conf`:
 
 ```named.conf
@@ -118,15 +158,15 @@ options {
 };
 
 controls {
-    inet 0.0.0.0 port 953 allow { <admin-host-ip>; } keys { "rndc-key"; };
+    inet 0.0.0.0 port 953 allow { <admin-host-ip>; } keys { "rndc-control-key"; };
 };
 
-key "rndc-key" {
-    algorithm hmac-sha256;
-    secret "BASE64...";    # from tsig-keygen
-};
+key "rndc-control-key" { algorithm hmac-sha256; secret "BASE64..."; };
+key "dns-update-key"   { algorithm hmac-sha256; secret "BASE64..."; };
+key "axfr-read-key"    { algorithm hmac-sha256; secret "BASE64..."; };
 ```
 
 3. Allow the admin host through the firewall to port 953 (and TCP 53 for
    dynamic updates once Phase 1b/1c land).
-4. Register the server in the UI with the key name + base64 secret.
+4. Register the server in the UI with key names + base64 secrets. Only
+   HMAC-SHA256/384/512 are accepted.

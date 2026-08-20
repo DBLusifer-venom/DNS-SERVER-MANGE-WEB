@@ -4,6 +4,8 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 Role = Literal["admin", "operator", "viewer"]
+# HMAC-MD5 and HMAC-SHA1 are deliberately not offered.
+RndcAlgorithm = Literal["sha256", "sha384", "sha512"]
 
 
 class LoginRequest(BaseModel):
@@ -66,7 +68,7 @@ class ServerCreate(BaseModel):
     notes: str | None = None
     rndc_port: int = Field(default=953, ge=1, le=65535)
     rndc_key_name: str = Field(min_length=1, max_length=128)
-    rndc_algorithm: Literal["md5", "sha1", "sha224", "sha256", "sha384", "sha512"] = "sha256"
+    rndc_algorithm: RndcAlgorithm = "sha256"
     rndc_secret: str = Field(min_length=8, max_length=512)  # base64 secret
     update_port: int = Field(default=53, ge=1, le=65535)
     update_key_name: str = Field(min_length=1, max_length=128)
@@ -79,7 +81,7 @@ class ServerUpdate(BaseModel):
     notes: str | None = None
     rndc_port: int | None = Field(default=None, ge=1, le=65535)
     rndc_key_name: str | None = None
-    rndc_algorithm: Literal["md5", "sha1", "sha224", "sha256", "sha384", "sha512"] | None = None
+    rndc_algorithm: RndcAlgorithm | None = None
     rndc_secret: str | None = None
     update_port: int | None = Field(default=None, ge=1, le=65535)
     update_key_name: str | None = None
@@ -103,6 +105,11 @@ class ServerOut(BaseModel):
     last_error: str | None
     last_checked_at: datetime | None
     created_at: datetime
+    assigned_user_ids: list[int] = []
+
+
+class ServerAssignmentsIn(BaseModel):
+    user_ids: list[int] = Field(min_length=0)
 
 
 class ServerTestResult(BaseModel):

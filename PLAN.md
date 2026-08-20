@@ -112,19 +112,32 @@ users_token  id, user_id FK, refresh_token_hash, expires_at, revoked
 
 | Role    | Permissions |
 |---------|-------------|
-| admin   | Everything incl. users, servers, alerts, audit |
-| operator| Zones/records/DNSSEC on assigned servers, view audit |
+| admin   | Everything incl. users, servers, assignments, alerts, audit |
+| operator| Zones/records/DNSSEC **on assigned servers only** |
 | viewer  | Read-only dashboards, zones, records |
+
+Implementations: `server_assignments` table; operators see only their
+assigned servers; object-level checks on every server endpoint.
 
 ## 8. Security Requirements
 
-- HTTPS-only (nginx TLS termination, HSTS)
-- Argon2id password hashing, JWT short-lived + refresh tokens (revocable)
-- API keys encrypted at rest with Fernet; never exposed via API
-- Rate limiting on login; account lockout after N failures
-- RBAC enforced middleware on every endpoint (incl. object-level server checks)
-- Full audit of all mutations: who/what/when/from-IP/payload
-- Documented recommendation: firewall so only app IP can reach rndc :953 and TCP 53 per DNS server
+- HTTPS-only (nginx TLS termination, HSTS, CSP, referrer/permissions headers)
+- Startup refuses insecure config: `SECRET_KEY`/`FERNET_KEY`/`ADMIN_PASSWORD`
+  mandatory, placeholder values rejected; Swagger/docs off in production
+- Argon2id password hashing; short-lived JWT (no role claim — DB is
+  authoritative) + rotated, revocable refresh tokens in HttpOnly
+  Secure SameSite cookies
+- TSIG keys encrypted at rest (Fernet); never exposed via API;
+  HMAC-SHA256/384/512 only (no MD5/SHA1)
+- Destination policy: DNS server IPs must resolve inside
+  `DNS_MANAGEMENT_NETWORKS`; link-local/multicast/metadata/loopback
+  (prod) denied — no SSRF surface
+- Rate limiting on login (account lockout; Redis-backed when HA)
+- RBAC enforced middleware on every endpoint incl. object-level
+  server assignment checks
+- Full audit of all mutations: who/what/when/from-IP/payload;
+  before/after payloads for DNS record changes
+- Firewall: rndc :953 and TCP 53 reachable only from the admin host
 - No default credentials; first-run admin bootstrap flow
 
 ## 9. Deployment
@@ -135,33 +148,39 @@ users_token  id, user_id FK, refresh_token_hash, expires_at, revoked
 
 ## 10. Risks / Open Questions
 
-- rndc protocol is custom (JSON over TCP + TSIG) — pure-Python client needed;
-  verified against BIND source + mock server tests
+- rndc protocol is custom (isccc over TCP + TSIG) — client verified against
+  ISC's python-rndc and mock-server tests; real-BIND integration tests
+  required before production (P1)
 - No rndc "list all zones" command → tool DB is the zone registry;
   `rndc zonestatus` validates each registered zone
-- AXFR for reading zone contents requires `allow-transfer` for the tool IP
+- AXFR for reading zone contents requires a dedicated `axfr-read-key`
+  (never the rndc control key)
 - Test environment needed: 2 BIND9 VMs/containers before integration work
 - Alert channels: SMTP email first, webhook (Slack/Teams) optional
+- Rate limiting is per-account; distributed IP-based limiting + Redis
+  when HA (P2)
+- Audit log lives in the app DB today; SIEM/syslog export planned (P2)
 
 ## 11. BIND9 server-side requirements (per DNS server)
+
+Separate TSIG keys per function (rndc-control / dns-update / axfr-read).
 
 ```named.conf
 options {
     allow-new-zones yes;           # required for rndc addzone
-    allow-query { any; };          # adjust to org policy
+    # allow-query set per zone/role: authoritative-public, -private,
+    # split-horizon etc. — never blanket 'any' unless truly public
 };
 
 controls {
-    inet 0.0.0.0 port 953 allow { <admin-host-ip>; } keys { "rndc-key"; };
+    inet 0.0.0.0 port 953 allow { <admin-host-ip>; } keys { "rndc-control-key"; };
 };
 
-key "rndc-key" {
-    algorithm hmac-sha256;
-    secret "BASE64...";            # generate with: tsig-keygen -a hmac-sha256 rndc-key
-};
+key "rndc-control-key" { algorithm hmac-sha256; secret "BASE64..."; };
+key "dns-update-key"   { algorithm hmac-sha256; secret "BASE64..."; };
 
 # Per-zone, created by the tool via rndc addzone:
-#   type master; allow-update { key "rndc-key"; };
+#   type master; allow-update { key "dns-update-key"; };
 #   inline-signing yes; dnssec-policy "default"; zone-statistics yes;
-#   allow-transfer { key "rndc-key"; };   # so the tool can AXFR zone contents
+#   allow-transfer { key "axfr-read-key"; };   # tool AXFRs zone contents
 ```

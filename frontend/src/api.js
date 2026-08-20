@@ -1,19 +1,18 @@
 import axios from 'axios'
 
-export const api = axios.create({ baseURL: '/' })
+// Access token lives in memory only (never localStorage).
+// Refresh token lives in an HttpOnly Secure SameSite cookie set by the backend.
+export const api = axios.create({ baseURL: '/', withCredentials: true })
 
-let accessToken = localStorage.getItem('access_token') || null
-let refreshToken = localStorage.getItem('refresh_token') || null
+let accessToken = null
 let refreshPromise = null
 
-export function setTokens(access, refresh) {
-  accessToken = access
-  refreshToken = refresh
+export function setAccessToken(token) {
+  accessToken = token
 }
 
-export function clearTokens() {
+export function clearAccessToken() {
   accessToken = null
-  refreshToken = null
 }
 
 api.interceptors.request.use((config) => {
@@ -25,26 +24,22 @@ api.interceptors.response.use(
   (res) => res,
   async (error) => {
     const original = error.config
-    if (error.response?.status === 401 && !original._retry && refreshToken) {
+    if (error.response?.status === 401 && !original._retry) {
       original._retry = true
       try {
         if (!refreshPromise) {
-          refreshPromise = axios
-            .post('/api/auth/refresh', { refresh_token: refreshToken })
+          // No token in the body: the HttpOnly cookie is sent automatically.
+          refreshPromise = api
+            .post('/api/auth/refresh')
             .then((r) => r.data)
             .finally(() => (refreshPromise = null))
         }
         const data = await refreshPromise
-        setTokens(data.access_token, data.refresh_token)
-        localStorage.setItem('access_token', data.access_token)
-        localStorage.setItem('refresh_token', data.refresh_token)
+        setAccessToken(data.access_token)
         original.headers.Authorization = `Bearer ${data.access_token}`
         return api(original)
       } catch {
-        clearTokens()
-        localStorage.removeItem('access_token')
-        localStorage.removeItem('refresh_token')
-        localStorage.removeItem('user')
+        clearAccessToken()
         if (window.location.pathname !== '/login') window.location.href = '/login'
       }
     }

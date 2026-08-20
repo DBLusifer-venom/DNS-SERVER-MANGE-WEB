@@ -5,8 +5,11 @@ import { useAuthStore } from '../stores/auth'
 
 const auth = useAuthStore()
 const servers = ref([])
+const users = ref([])
 const error = ref('')
 const testing = ref(null)
+const assign = ref({ serverId: null, selected: [] })
+const assignError = ref('')
 const form = ref({
   name: '',
   host: '',
@@ -25,6 +28,28 @@ const isAdmin = () => auth.user?.role === 'admin'
 async function load() {
   const res = await api.get('/api/servers')
   servers.value = res.data
+  if (isAdmin()) {
+    const usersRes = await api.get('/api/users')
+    users.value = usersRes.data
+  }
+}
+
+async function selectAssignServer(s) {
+  assign.value.serverId = s.id
+  assign.value.selected = [...s.assigned_user_ids]
+}
+
+async function saveAssignments() {
+  assignError.value = ''
+  try {
+    const res = await api.put(`/api/servers/${assign.value.serverId}/assignments`, {
+      user_ids: assign.value.selected,
+    })
+    const s = servers.value.find((x) => x.id === assign.value.serverId)
+    if (s) s.assigned_user_ids = res.data.user_ids
+  } catch (e) {
+    assignError.value = e.response?.data?.detail || 'Failed to save assignments'
+  }
 }
 
 async function create() {
@@ -137,6 +162,7 @@ onMounted(load)
             <td class="muted small">{{ s.last_checked_at ? new Date(s.last_checked_at).toLocaleString() : '—' }}</td>
             <td class="row">
               <button :disabled="testing === s.id" @click="testServer(s)">{{ testing === s.id ? 'Testing…' : 'Test' }}</button>
+              <button v-if="isAdmin()" @click="selectAssignServer(s)">Assign</button>
               <button v-if="isAdmin()" class="danger" @click="remove(s)">Delete</button>
             </td>
           </tr>
@@ -145,6 +171,23 @@ onMounted(load)
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <div v-if="isAdmin() && assign.serverId" class="panel mt">
+      <h3>Assign operators — {{ servers.find((s) => s.id === assign.serverId)?.name }}</h3>
+      <p class="muted small">Operators can only see and manage servers assigned to them.</p>
+      <div class="chips">
+        <label v-for="u in users.filter((u) => u.role === 'operator' && u.active)" :key="u.id" class="chip">
+          <input
+            type="checkbox"
+            :value="u.id"
+            v-model="assign.selected"
+          />
+          {{ u.username }}
+        </label>
+      </div>
+      <p v-if="assignError" class="error">{{ assignError }}</p>
+      <button class="primary mt" @click="saveAssignments">Save assignments</button>
     </div>
   </div>
 </template>
@@ -161,5 +204,32 @@ h4 {
   color: var(--accent);
   font-weight: 500;
   font-size: 0.9rem;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 0.3rem 0.8rem;
+  margin: 0;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.chip input {
+  width: auto;
+}
+
+.chip:hover {
+  background: var(--panel-2);
 }
 </style>

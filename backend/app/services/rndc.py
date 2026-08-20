@@ -21,19 +21,15 @@ import socket
 import struct
 import time
 
+# Only strong algorithms are accepted. MD5 and SHA-1 are deliberately
+# unsupported (HMAC-SHA256/384/512 only).
 ALGORITHMS = {
-    "md5": 157,
-    "sha1": 161,
-    "sha224": 162,
     "sha256": 163,
     "sha384": 164,
     "sha512": 165,
 }
 
 _HASHES = {
-    "md5": hashlib.md5,
-    "sha1": hashlib.sha1,
-    "sha224": hashlib.sha224,
     "sha256": hashlib.sha256,
     "sha384": hashlib.sha384,
     "sha512": hashlib.sha512,

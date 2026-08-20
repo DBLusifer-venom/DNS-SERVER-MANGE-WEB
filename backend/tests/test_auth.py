@@ -1,3 +1,4 @@
+import base64
 import os
 import sys
 
@@ -5,9 +6,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_secure_dns.db"
 os.environ["SECRET_KEY"] = "test-secret-key-not-for-production"
+os.environ["FERNET_KEY"] = base64.urlsafe_b64encode(b"f" * 32).decode()
 os.environ["ADMIN_PASSWORD"] = "Test_Admin_Pass_123!"
 os.environ["ADMIN_USERNAME"] = "tadmin"
+os.environ["COOKIE_SECURE"] = "false"
 
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 
@@ -46,13 +50,27 @@ def test_health(client):
     assert r.json()["status"] == "ok"
 
 
-def test_login_success(client):
+def test_login_success_sets_http_only_cookie(client):
     r = client.post("/api/auth/login", json={"username": "tadmin", "password": "Test_Admin_Pass_123!"})
     assert r.status_code == 200
     body = r.json()
     assert body["access_token"]
     assert body["refresh_token"]
     assert body["token_type"] == "bearer"
+    cookie = r.cookies.get("sd_refresh")
+    assert cookie is not None
+    set_cookie = r.headers.get("set-cookie", "")
+    assert "HttpOnly" in set_cookie
+    assert "SameSite=strict" in set_cookie
+    assert "Secure" not in set_cookie  # COOKIE_SECURE=false in tests
+
+
+def test_access_token_has_no_role_claim(client, admin_token):
+    payload = jwt.decode(
+        admin_token, os.environ["SECRET_KEY"], algorithms=["HS256"]
+    )
+    assert "role" not in payload
+    assert payload["type"] == "access"
 
 
 def test_login_bad_password(client):
@@ -72,12 +90,25 @@ def test_me_no_token(client):
     assert r.status_code == 401
 
 
-def test_refresh_flow(client, admin_token):
+def test_refresh_via_cookie(client):
+    login = client.post("/api/auth/login", json={"username": "tadmin", "password": "Test_Admin_Pass_123!"})
+    assert login.status_code == 200
+    r = client.post("/api/auth/refresh")  # token read from HttpOnly cookie
+    assert r.status_code == 200, r.text
+    assert r.json()["access_token"]
+
+
+def test_refresh_via_body(client):
     login = client.post("/api/auth/login", json={"username": "tadmin", "password": "Test_Admin_Pass_123!"})
     refresh = login.json()["refresh_token"]
     r = client.post("/api/auth/refresh", json={"refresh_token": refresh})
     assert r.status_code == 200
     assert r.json()["access_token"]
+
+
+def test_refresh_without_token(client):
+    r = client.post("/api/auth/refresh")
+    assert r.status_code == 401
 
 
 def test_refresh_reuse_revoked(client):
@@ -87,6 +118,15 @@ def test_refresh_reuse_revoked(client):
     assert r1.status_code == 200
     r2 = client.post("/api/auth/refresh", json={"refresh_token": refresh})
     assert r2.status_code == 401
+
+
+def test_logout_revokes(client):
+    login = client.post("/api/auth/login", json={"username": "tadmin", "password": "Test_Admin_Pass_123!"})
+    refresh = login.json()["refresh_token"]
+    r = client.post("/api/auth/logout", json={"refresh_token": refresh})
+    assert r.status_code == 200
+    r = client.post("/api/auth/refresh", json={"refresh_token": refresh})
+    assert r.status_code == 401
 
 
 def test_admin_creates_user(client, admin_token):

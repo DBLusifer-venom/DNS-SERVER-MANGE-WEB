@@ -11,7 +11,15 @@ from .config import get_settings
 
 settings = get_settings()
 _hasher = PasswordHasher()
-_fernet = Fernet(settings.resolved_fernet_key.encode())
+_fernet: Fernet | None = None
+
+
+def _get_fernet() -> Fernet:
+    """Lazily build the Fernet instance so startup validation runs first."""
+    global _fernet
+    if _fernet is None:
+        _fernet = Fernet(settings.effective_fernet_key().encode())
+    return _fernet
 
 
 # --- Passwords (Argon2id) ---------------------------------------------------
@@ -30,22 +38,22 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 # --- JWT access tokens ------------------------------------------------------
+# Note: no role claim — the database is the single source of truth for roles.
 
-def create_access_token(user_id: int, role: str) -> tuple[str, int]:
+def create_access_token(user_id: int) -> tuple[str, int]:
     expires = timedelta(minutes=settings.access_token_expire_minutes)
     now = datetime.now(timezone.utc)
     payload = {
         "sub": str(user_id),
-        "role": role,
         "type": "access",
         "iat": now,
         "exp": now + expires,
     }
-    return jwt.encode(payload, settings.secret_key, algorithm="HS256"), settings.access_token_expire_minutes * 60
+    return jwt.encode(payload, settings.effective_secret_key(), algorithm="HS256"), settings.access_token_expire_minutes * 60
 
 
 def decode_access_token(token: str) -> dict:
-    return jwt.decode(token, settings.secret_key, algorithms=["HS256"])
+    return jwt.decode(token, settings.effective_secret_key(), algorithms=["HS256"])
 
 
 # --- Refresh tokens (opaque, stored hashed) ----------------------------------
@@ -63,11 +71,11 @@ def refresh_expiry() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=settings.refresh_token_expire_days)
 
 
-# --- Fernet for stored secrets (API keys, phase 1) ----------------------------
+# --- Fernet for stored secrets (TSIG keys) -----------------------------------
 
 def encrypt_secret(value: str) -> str:
-    return _fernet.encrypt(value.encode()).decode()
+    return _get_fernet().encrypt(value.encode()).decode()
 
 
 def decrypt_secret(value: str) -> str:
-    return _fernet.decrypt(value.encode()).decode()
+    return _get_fernet().decrypt(value.encode()).decode()

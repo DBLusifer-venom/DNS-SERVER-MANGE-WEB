@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
 
 from ..config import get_settings
@@ -28,8 +28,34 @@ def _naive_now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _set_refresh_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=settings.cookie_name,
+        value=token,
+        max_age=settings.refresh_token_expire_days * 86400,
+        httponly=True,
+        secure=settings.cookie_secure,
+        samesite="strict",
+        path="/api/auth",
+    )
+
+
+def _clear_refresh_cookie(response: Response) -> None:
+    response.delete_cookie(key=settings.cookie_name, path="/api/auth")
+
+
+def _extract_refresh_token(body: RefreshRequest | None, cookie: str | None) -> str:
+    # Explicit body token wins (e.g. API clients); the cookie is the
+    # browser convenience. Either path goes through rotation+reuse checks.
+    if body and body.refresh_token:
+        return body.refresh_token
+    if cookie:
+        return cookie
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing refresh token")
+
+
 @router.post("/login", response_model=TokenResponse)
-def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
+def login(body: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == body.username).first()
     ip, ua = _client_meta(request)
 
@@ -64,14 +90,22 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     write_audit(db, user, "auth.login", "user", user.username, request=request)
     db.commit()
 
-    access_token, expires_in = create_access_token(user.id, user.role)
+    access_token, expires_in = create_access_token(user.id)
+    _set_refresh_cookie(response, refresh_token)
     return TokenResponse(access_token=access_token, refresh_token=refresh_token, expires_in=expires_in)
 
 
 @router.post("/refresh", response_model=TokenResponse)
-def refresh(body: RefreshRequest, request: Request, db: Session = Depends(get_db)):
+def refresh(
+    request: Request,
+    response: Response,
+    body: RefreshRequest | None = None,
+    refresh_cookie: str | None = Cookie(default=None, alias=settings.cookie_name),
+    db: Session = Depends(get_db),
+):
     ip, ua = _client_meta(request)
-    token_hash = hash_token(body.refresh_token)
+    token = _extract_refresh_token(body, refresh_cookie)
+    token_hash = hash_token(token)
     stored = db.query(UserToken).filter(UserToken.token_hash == token_hash).first()
 
     if stored is None or stored.revoked or stored.expires_at < _naive_now():
@@ -88,17 +122,30 @@ def refresh(body: RefreshRequest, request: Request, db: Session = Depends(get_db
     write_audit(db, user, "auth.refresh", "user", user.username, request=request)
     db.commit()
 
-    access_token, expires_in = create_access_token(user.id, user.role)
+    access_token, expires_in = create_access_token(user.id)
+    _set_refresh_cookie(response, new_refresh)
     return TokenResponse(access_token=access_token, refresh_token=new_refresh, expires_in=expires_in)
 
 
 @router.post("/logout")
-def logout(body: RefreshRequest, request: Request, db: Session = Depends(get_db)):
-    token_hash = hash_token(body.refresh_token)
+def logout(
+    request: Request,
+    response: Response,
+    body: RefreshRequest | None = None,
+    refresh_cookie: str | None = Cookie(default=None, alias=settings.cookie_name),
+    db: Session = Depends(get_db),
+):
+    try:
+        token = _extract_refresh_token(body, refresh_cookie)
+    except HTTPException:
+        _clear_refresh_cookie(response)
+        return {"ok": True}
+    token_hash = hash_token(token)
     stored = db.query(UserToken).filter(UserToken.token_hash == token_hash).first()
     if stored:
         stored.revoked = True
         db.commit()
+    _clear_refresh_cookie(response)
     return {"ok": True}
 
 
