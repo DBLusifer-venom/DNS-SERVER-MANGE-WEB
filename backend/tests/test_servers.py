@@ -96,6 +96,33 @@ def test_create_server(client, admin_token, mock_rndc):
     assert r.json()["name"] == "ns1"
     assert r.json()["status"] == "unknown"
     assert r.json()["assigned_user_ids"] == []
+    assert r.json()["pinned_ips"] == ["127.0.0.1"]  # explicit per-server allowlist
+
+
+def test_update_host_re_pins(client, admin_token, mock_rndc):
+    sid = create_server(client, admin_token, "ns-repin", port=mock_rndc.port)
+    r = client.patch(f"/api/servers/{sid}", json={"host": "127.0.0.2"}, headers=auth(admin_token))
+    assert r.status_code == 200
+    assert r.json()["pinned_ips"] == ["127.0.0.2"]
+
+
+def test_test_server_blocked_when_pins_mismatch(client, admin_token, mock_rndc):
+    sid = create_server(client, admin_token, "ns-rebind", port=mock_rndc.port)
+    # Simulate DNS rebinding: pins point elsewhere than the host now resolves to
+    from app.database import SessionLocal
+    from app.models import Server
+
+    db = SessionLocal()
+    try:
+        s = db.get(Server, sid)
+        s.pinned_ips = "127.0.0.2"  # host still 127.0.0.1
+        db.commit()
+    finally:
+        db.close()
+    r = client.post(f"/api/servers/{sid}/test", headers=auth(admin_token))
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+    assert "re-pin" in r.json()["detail"]
 
 
 def test_test_server_ok(client, admin_token, mock_rndc):

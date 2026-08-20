@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 Role = Literal["admin", "operator", "viewer"]
 # HMAC-MD5 and HMAC-SHA1 are deliberately not offered.
@@ -106,6 +106,14 @@ class ServerOut(BaseModel):
     last_checked_at: datetime | None
     created_at: datetime
     assigned_user_ids: list[int] = []
+    pinned_ips: list[str] = []
+
+    @field_validator("pinned_ips", mode="before")
+    @classmethod
+    def _split_pinned(cls, v):
+        if isinstance(v, str):
+            return [p for p in v.split(",") if p]
+        return v or []
 
 
 class ServerAssignmentsIn(BaseModel):

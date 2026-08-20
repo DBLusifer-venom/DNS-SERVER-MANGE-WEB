@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import uuid
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
 from sqlalchemy.orm import Session
@@ -15,6 +16,7 @@ from ..security import (
     refresh_expiry,
     verify_password,
 )
+from ..services.ratelimit import check_and_record, clear
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 settings = get_settings()
@@ -54,8 +56,21 @@ def _extract_refresh_token(body: RefreshRequest | None, cookie: str | None) -> s
     raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing refresh token")
 
 
+def _rate_limit(request: Request, username: str) -> None:
+    """429 when the client IP or username exceeds the failure window.
+    Keys are cleared on successful login."""
+    ip = request.client.host if request.client else "unknown"
+    if not check_and_record(f"ip:{ip}") or not check_and_record(f"user:{username}"):
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many login attempts — try again later",
+            headers={"Retry-After": str(settings.rate_limit_window_seconds)},
+        )
+
+
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)):
+    _rate_limit(request, body.username)
     user = db.query(User).filter(User.username == body.username).first()
     ip, ua = _client_meta(request)
 
@@ -84,11 +99,15 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
 
     user.failed_logins = 0
     user.locked_until = None
+    family_id = uuid.uuid4().hex
     refresh_token, _ = generate_refresh_token()
-    db.add(UserToken(user_id=user.id, token_hash=hash_token(refresh_token), expires_at=refresh_expiry(), ip_address=ip, user_agent=ua))
+    db.add(UserToken(user_id=user.id, token_hash=hash_token(refresh_token), family_id=family_id, expires_at=refresh_expiry(), ip_address=ip, user_agent=ua))
     db.commit()
     write_audit(db, user, "auth.login", "user", user.username, request=request)
     db.commit()
+    clear(f"user:{body.username}")
+    if request.client:
+        clear(f"ip:{request.client.host}")
 
     access_token, expires_in = create_access_token(user.id)
     _set_refresh_cookie(response, refresh_token)
@@ -108,8 +127,23 @@ def refresh(
     token_hash = hash_token(token)
     stored = db.query(UserToken).filter(UserToken.token_hash == token_hash).first()
 
-    if stored is None or stored.revoked or stored.expires_at < _naive_now():
+    if stored is None or stored.expires_at < _naive_now():
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid refresh token")
+
+    if stored.revoked:
+        # Reuse of a rotated-out token: compromise suspected.
+        # Revoke the WHOLE token family, not just this one.
+        if stored.family_id:
+            db.query(UserToken).filter(
+                UserToken.family_id == stored.family_id, UserToken.revoked.is_(False)
+            ).update({"revoked": True}, synchronize_session=False)
+            db.commit()
+        write_audit(db, None, "auth.token_reuse", "user", str(stored.user_id), request=request)
+        db.commit()
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED,
+            "Refresh token reuse detected — all sessions in this family were revoked",
+        )
 
     user = db.get(User, stored.user_id)
     if user is None or not user.active:
@@ -117,7 +151,7 @@ def refresh(
 
     stored.revoked = True
     new_refresh, _ = generate_refresh_token()
-    db.add(UserToken(user_id=user.id, token_hash=hash_token(new_refresh), expires_at=refresh_expiry(), ip_address=ip, user_agent=ua))
+    db.add(UserToken(user_id=user.id, token_hash=hash_token(new_refresh), family_id=stored.family_id, expires_at=refresh_expiry(), ip_address=ip, user_agent=ua))
     db.commit()
     write_audit(db, user, "auth.refresh", "user", user.username, request=request)
     db.commit()

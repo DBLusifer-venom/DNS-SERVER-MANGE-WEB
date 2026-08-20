@@ -126,13 +126,15 @@ assigned servers; object-level checks on every server endpoint.
   mandatory, placeholder values rejected; Swagger/docs off in production
 - Argon2id password hashing; short-lived JWT (no role claim — DB is
   authoritative) + rotated, revocable refresh tokens in HttpOnly
-  Secure SameSite cookies
+  Secure SameSite cookies; token-family revocation on reuse
 - TSIG keys encrypted at rest (Fernet); never exposed via API;
   HMAC-SHA256/384/512 only (no MD5/SHA1)
 - Destination policy: DNS server IPs must resolve inside
   `DNS_MANAGEMENT_NETWORKS`; link-local/multicast/metadata/loopback
-  (prod) denied — no SSRF surface
-- Rate limiting on login (account lockout; Redis-backed when HA)
+  (prod) denied — no SSRF surface; per-server IP pinning with
+  re-verification on every connect (anti-DNS-rebinding)
+- Rate limiting on login: per-IP + per-username sliding windows,
+  account lockout (Redis-backed when HA)
 - RBAC enforced middleware on every endpoint incl. object-level
   server assignment checks
 - Full audit of all mutations: who/what/when/from-IP/payload;

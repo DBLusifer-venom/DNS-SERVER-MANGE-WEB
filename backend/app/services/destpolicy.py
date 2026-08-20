@@ -79,3 +79,28 @@ def validate_destination(host: str) -> None:
     for ip in ips:
         if not any(ip in net for net in allowed):
             raise ValueError(f"destination {ip.compressed} is not inside allowed management networks")
+
+
+def pin_destination(host: str) -> list[str]:
+    """Validate + resolve host, returning the canonical sorted IP list to
+    pin on the Server record (the explicit per-server allowlist)."""
+    validate_destination(host)
+    return sorted({ip.compressed for ip in resolve_host_ips(host)})
+
+
+def validate_pinned(host: str, pinned_ips: list[str] | None) -> None:
+    """At connect time, re-resolve host and require the current IP set to
+    be a subset of the pinned set (anti-DNS-rebinding / silent host change).
+
+    A host may legitimately drop an address family (e.g. AAAA removed), so
+    a subset is accepted; any *new* address not pinned at registration is
+    rejected and the server record must be updated to re-pin.
+    """
+    if not pinned_ips:
+        return  # legacy rows: fall back to validate_destination only
+    current = {ip.compressed for ip in resolve_host_ips(host)}
+    if not current <= set(pinned_ips):
+        raise ValueError(
+            f"host '{host}' now resolves to {sorted(current)} which is not within "
+            f"pinned IPs {sorted(pinned_ips)}; re-save the server record to re-pin"
+        )

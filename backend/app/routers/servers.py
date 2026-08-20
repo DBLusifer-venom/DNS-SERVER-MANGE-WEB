@@ -9,7 +9,7 @@ from ..models import Server, ServerAssignment, User
 from ..schemas import ServerAssignmentsIn, ServerCreate, ServerOut, ServerTestResult, ServerUpdate
 from ..security import encrypt_secret
 from ..services.bind_control import BindServer, test_server
-from ..services.destpolicy import validate_destination
+from ..services.destpolicy import pin_destination, validate_destination
 
 router = APIRouter(prefix="/api/servers", tags=["servers"])
 admin = require_role("admin")
@@ -21,6 +21,7 @@ def _serialize(db: Session, server: Server) -> ServerOut:
     out.assigned_user_ids = [
         a.user_id for a in db.query(ServerAssignment).filter(ServerAssignment.server_id == server.id).all()
     ]
+    out.pinned_ips = [p for p in (server.pinned_ips or "").split(",") if p]
     return out
 
 
@@ -46,6 +47,15 @@ def _validated_host(host: str) -> str:
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
     return host
+
+
+def _pinned_host(host: str) -> str:
+    """Validate host and return the comma-joined pinned IP list (explicit
+    per-server allowlist, resolved at registration time)."""
+    try:
+        return ",".join(pin_destination(host))
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc))
 
 
 @router.get("", response_model=list[ServerOut])
@@ -80,6 +90,7 @@ def create_server(body: ServerCreate, request: Request, db: Session = Depends(ge
         update_port=body.update_port,
         update_key_name=body.update_key_name,
         update_secret_enc=encrypt_secret(body.update_secret),
+        pinned_ips=_pinned_host(body.host),
     )
     db.add(server)
     db.commit()
@@ -106,6 +117,7 @@ def update_server(
     changes = body.model_dump(exclude_unset=True)
     if "host" in changes:
         _validated_host(changes["host"])
+        server.pinned_ips = _pinned_host(changes["host"])  # re-pin on host change
     if "name" in changes and changes["name"] != server.name:
         existing = db.query(Server).filter(Server.name == changes["name"]).first()
         if existing:

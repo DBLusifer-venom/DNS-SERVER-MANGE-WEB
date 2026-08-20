@@ -1,8 +1,12 @@
 from ..models import Server
 from ..security import decrypt_secret
-from .destpolicy import validate_destination
+from .destpolicy import validate_destination, validate_pinned
 from .dnsname import validate_dns_name
 from .rndc import RndcClient, RndcError, parse_status_text
+
+
+def _pinned(server: Server) -> list[str]:
+    return [p for p in (server.pinned_ips or "").split(",") if p]
 
 
 class BindServer:
@@ -15,6 +19,7 @@ class BindServer:
     def _client(self) -> RndcClient:
         if self._rndc is None:
             validate_destination(self.server.host)  # defense in depth
+            validate_pinned(self.server.host, _pinned(self.server))  # anti-DNS-rebinding
             self._rndc = RndcClient(
                 host=self.server.host,
                 port=self.server.rndc_port,
@@ -72,6 +77,7 @@ def test_server(server: Server) -> tuple[bool, str, str, str]:
     """Returns (ok, version, detail, raw_status_text)."""
     try:
         validate_destination(server.host)
+        validate_pinned(server.host, _pinned(server))
         client = RndcClient(
             host=server.host,
             port=server.rndc_port,

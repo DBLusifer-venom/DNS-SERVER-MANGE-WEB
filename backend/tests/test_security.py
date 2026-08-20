@@ -116,3 +116,17 @@ class TestDestinationPolicy:
     def test_bad_hostname_rejected(self):
         with pytest.raises(ValueError):
             destpolicy.validate_destination("no-such-host.invalid.")
+
+    def test_pin_destination_returns_canonical_ips(self):
+        assert destpolicy.pin_destination("127.0.0.1") == ["127.0.0.1"]
+
+    def test_validate_pinned_accepts_current_subset(self):
+        destpolicy.validate_pinned("127.0.0.1", ["127.0.0.1"])
+
+    def test_validate_pinned_rejects_new_ip(self):
+        with pytest.raises(ValueError, match="re-pin"):
+            destpolicy.validate_pinned("127.0.0.1", ["127.0.0.2"])
+
+    def test_validate_pinned_noop_without_pins(self):
+        destpolicy.validate_pinned("127.0.0.1", None)  # legacy rows
+        destpolicy.validate_pinned("127.0.0.1", [])

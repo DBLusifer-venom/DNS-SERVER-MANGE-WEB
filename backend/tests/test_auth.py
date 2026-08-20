@@ -120,6 +120,23 @@ def test_refresh_reuse_revoked(client):
     assert r2.status_code == 401
 
 
+def test_refresh_reuse_revokes_whole_family(client):
+    # A -> B via rotation; replaying A must kill B (and the entire family).
+    login = client.post("/api/auth/login", json={"username": "tadmin", "password": "Test_Admin_Pass_123!"})
+    a = login.json()["refresh_token"]
+    r = client.post("/api/auth/refresh", json={"refresh_token": a})
+    assert r.status_code == 200
+    b = r.json()["refresh_token"]
+
+    replay = client.post("/api/auth/refresh", json={"refresh_token": a})
+    assert replay.status_code == 401
+    assert "reuse" in replay.json()["detail"].lower()
+
+    # B is now dead too (whole family revoked on replay).
+    r = client.post("/api/auth/refresh", json={"refresh_token": b})
+    assert r.status_code == 401
+
+
 def test_logout_revokes(client):
     login = client.post("/api/auth/login", json={"username": "tadmin", "password": "Test_Admin_Pass_123!"})
     refresh = login.json()["refresh_token"]

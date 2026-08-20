@@ -30,6 +30,15 @@ servers page in the UI. Phase 1b (zone registry via `rndc addzone`) is next.
 - Server-level RBAC: operators only see/manage assigned servers
 - Stricter systemd sandboxing + nginx CSP/referrer/permissions headers
 
+**Hardening round 2 complete** (second external review pass):
+- Token families: replaying a rotated-out refresh token revokes the
+  entire family and is audited (`auth.token_reuse`)
+- Login rate limiting: per-IP and per-username sliding windows (429 +
+  Retry-After) in addition to account lockout
+- Explicit per-server IP pinning: the IPs resolved at registration are
+  stored on the Server record and re-verified on every connection
+  (anti-DNS-rebinding); host changes re-pin automatically
+
 ## Security model
 
 - **Startup**: in production the app refuses to start unless
@@ -37,11 +46,15 @@ servers page in the UI. Phase 1b (zone registry via `rndc addzone`) is next.
   `DNS_MANAGEMENT_NETWORKS` are set to real values (placeholders rejected).
 - **Sessions**: Argon2id passwords; short-lived JWT access token (memory
   only in the browser) + rotated, revocable refresh token in an HttpOnly
-  cookie; per-account lockout after failed logins.
+  cookie; per-account lockout after failed logins; per-IP and per-username
+  sliding-window rate limiting on login (429 + Retry-After). Replaying a
+  rotated-out refresh token revokes the whole token family and is audited.
 - **Server destinations**: every registered DNS server's resolved IPs must
   fall inside `DNS_MANAGEMENT_NETWORKS`; denied networks (link-local,
   multicast, loopback in production, test ranges) are refused at
-  registration, update, and every rndc connect.
+  registration, update, and every rndc connect. The exact IPs resolved at
+  registration are pinned to the Server record and re-verified on every
+  connection (anti-DNS-rebinding).
 - **Keys**: rndc control and dynamic-update TSIG keys are stored separately
   and encrypted at rest (Fernet). Use distinct keys per function on the
   BIND side too (rndc-control vs dns-update vs axfr-read).
